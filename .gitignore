@@ -1,0 +1,66 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+
+# Local environment files and secrets. Keep sanitized templates shareable.
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.*.sample
+!.env.*.template
+*.local
+
+# Private keys, certificates, and signing material
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.mobileprovision
+
+# Local package-manager and cloud credentials
+.npmrc
+!.npmrc.example
+.pypirc
+.aws/credentials
+.config/gcloud/application_default_credentials.json
+credentials.json
+service-account*.json
+*-service-account*.json
+
+# Local infrastructure state and Supabase CLI artifacts
+*.tfstate
+*.tfstate.*
+*.tfvars
+!.tfvars.example
+supabase/*
+supabase/.temp/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+.vercel
+.env*
+
+# Server directories and files
+backend
+backend/*
