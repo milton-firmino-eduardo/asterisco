@@ -22,9 +22,11 @@ import {
 import { useAuth } from "@/contexts/AuthContext"
 import DirectMessages from "@/components/DirectMessages"
 import { CreateRoomDialog, IncomingRoomInviteDialog } from "@/components/RoomDialogs"
+import WatchRoomView from "@/components/rooms/WatchRoomView"
 import { resolveAvatarUrl } from "@/lib/avatar"
 import { getDmProfilesByIds } from "@/lib/directMessages"
 import { supabase } from "@/lib/supabase"
+import { createClockSync } from "@/sync/clockSync"
 
 const websocketEndpoint = import.meta.env.VITE_ASTERISCO_WS_URL
 const SWIPE_THRESHOLD = 64
@@ -91,6 +93,7 @@ export default function Home({ preview = false }) {
   const [profileAvatar, setProfileAvatar] = useState(null)
   const [connectionError, setConnectionError] = useState("")
   const [signingOut, setSigningOut] = useState(false)
+  const [clockOffsetMs, setClockOffsetMs] = useState(0)
   const socketRef = useRef(null)
   const connectingRef = useRef(false)
   const attemptRef = useRef(0)
@@ -98,6 +101,10 @@ export default function Home({ preview = false }) {
   const outgoingInviteTimerRef = useRef(null)
   const incomingInviteTimersRef = useRef(new Map())
   const respondingInviteIdRef = useRef(null)
+  const clockSyncRef = useRef(createClockSync())
+  const activeRoomRef = useRef(activeRoom)
+  const leavingRoomRef = useRef(false)
+  activeRoomRef.current = activeRoom
   const touchStartRef = useRef(null)
   const closeButtonRef = useRef(null)
   const drawerRef = useRef(null)
@@ -252,6 +259,59 @@ export default function Home({ preview = false }) {
     return () => window.clearTimeout(timeout)
   }, [connectionState])
 
+  const sendPlaybackAction = useCallback((event) => {
+    const socket = socketRef.current
+    const room = activeRoom
+    if (!socket || socket.readyState !== WebSocket.OPEN || !room) {
+      setConnectionError("Reconnect to the server before controlling playback.")
+      return false
+    }
+
+    const playbackRate = event.playback_rate ?? room.playback_rate
+    socket.send(JSON.stringify({
+      type: "playback_event",
+      room_id: room.room_id,
+      action: event.action,
+      timestamp: event.timestamp,
+      ...(event.action === "playback_rate" ? { playback_rate: playbackRate } : {}),
+    }))
+    const isPlaying = event.action === "play"
+      ? true
+      : event.action === "pause"
+        ? false
+        : room.is_playing
+    setActiveRoom((current) => current && ({
+      ...current,
+      is_playing: isPlaying,
+      position: event.timestamp,
+      playback_rate: playbackRate,
+      server_ts_ms: Date.now() + clockSyncRef.current.getOffsetMs(),
+      start_at_server_ms: null,
+    }))
+    return true
+  }, [activeRoom])
+
+  const requestRoomSync = useCallback(() => {
+    const socket = socketRef.current
+    const room = activeRoom
+    if (socket?.readyState === WebSocket.OPEN && room) {
+      socket.send(JSON.stringify({ type: "request_sync", room_id: room.room_id }))
+    }
+  }, [activeRoom])
+
+  const leaveActiveRoom = useCallback(() => {
+    const socket = socketRef.current
+    const room = activeRoom
+    if (socket?.readyState === WebSocket.OPEN && room) {
+      leavingRoomRef.current = true
+      socket.send(JSON.stringify({ type: "leave_room", room_id: room.room_id }))
+    } else {
+      leavingRoomRef.current = false
+    }
+    setActiveRoom(null)
+    setRoomNotice("You left the room.")
+  }, [activeRoom])
+
   async function connectToServer() {
     if (preview || !user) {
       navigate("/login")
@@ -297,6 +357,7 @@ export default function Home({ preview = false }) {
             ? Math.min(configuredInterval, 60)
             : 15
           window.clearInterval(heartbeatRef.current)
+          socket.send(JSON.stringify({ type: "ping", ts: Date.now() }))
           heartbeatRef.current = window.setInterval(() => {
             if (socket.readyState === WebSocket.OPEN) {
               socket.send(JSON.stringify({ type: "ping", ts: Date.now() }))
@@ -382,15 +443,23 @@ export default function Home({ preview = false }) {
           setIncomingInvites((current) => current.filter(
             (invite) => invite.invite_id !== message.invite_id
           ))
+        } else if (message?.type === "pong"
+          && Number.isFinite(message.ts)
+          && Number.isFinite(message.server_ts_ms)) {
+          clockSyncRef.current.observe(message.ts, message.server_ts_ms)
+          setClockOffsetMs(clockSyncRef.current.getOffsetMs())
         } else if (message?.type === "session_start" || message?.type === "sync_state") {
           setActiveRoom({
             room_id: message.room_id,
             video_id: message.video_id,
             controller_id: message.controller_id,
             viewer_id: message.viewer_id,
-            is_playing: message.is_playing ?? false,
+            is_playing: message.is_playing ?? message.type === "session_start",
             position: message.position ?? message.initial_position ?? 0,
             playback_rate: message.playback_rate ?? 1,
+            start_at_server_ms: message.start_at_server_ms ?? null,
+            server_ts_ms: message.server_ts_ms ?? Date.now() + clockSyncRef.current.getOffsetMs(),
+            drift_tolerance_seconds: message.drift_tolerance_seconds ?? 0.4,
           })
           setActiveTab("rooms")
           setRoomCreatorOpen(false)
@@ -406,15 +475,39 @@ export default function Home({ preview = false }) {
             respondingInviteIdRef.current = null
             setRespondingInviteId(null)
           }
+        } else if (message?.type === "playback_event") {
+          setActiveRoom((current) => {
+            if (!current || current.room_id !== message.room_id) return current
+            return {
+              ...current,
+              is_playing: message.is_playing,
+              position: message.timestamp,
+              playback_rate: message.playback_rate ?? current.playback_rate,
+              server_ts_ms: message.server_ts_ms ?? Date.now() + clockSyncRef.current.getOffsetMs(),
+              start_at_server_ms: null,
+            }
+          })
         } else if (message?.type === "session_ended"
           || message?.type === "participant_disconnected") {
+          const wasLeaving = leavingRoomRef.current
+          leavingRoomRef.current = false
           setActiveRoom(null)
           setRoomNotice(
-            message.reason === "participant_left"
-              ? "The other person left the room."
-              : "The room has ended."
+            wasLeaving
+              ? "You left the room."
+              : message.reason === "participant_left"
+                ? "The other person left the room."
+                : "The room has ended."
           )
         } else if (message?.type === "error") {
+          const currentRoom = activeRoomRef.current
+          if (message.code === "READ_ONLY_VIEWER" && currentRoom) {
+            setActiveRoom((current) => current && ({
+              ...current,
+              controller_id: current.viewer_id,
+            }))
+            socket.send(JSON.stringify({ type: "request_sync", room_id: currentRoom.room_id }))
+          }
           if (respondingInviteIdRef.current) {
             respondingInviteIdRef.current = null
             setRespondingInviteId(null)
@@ -688,19 +781,29 @@ export default function Home({ preview = false }) {
               {id === "rooms" ? (
                 <div className="mx-auto flex w-full max-w-md flex-1 flex-col justify-center py-8">
                   {activeRoom ? (
-                    <section aria-label="Active room" className="space-y-2 border-b border-[#edf0ed] pb-5">
-                      <div className="flex items-center gap-2 text-[#16803c]">
-                        <Video aria-hidden="true" className="size-[18px]" />
-                        <h2 className="text-sm font-semibold">Room in progress</h2>
-                      </div>
-                      <p className="text-xs text-[#59635d]">Room ID: {activeRoom.room_id}</p>
-                      <p className="truncate text-xs text-[#59635d]">Video ID: {activeRoom.video_id}</p>
-                      <p className="text-[11px] text-[#858d88]">
-                        {activeRoom.controller_id === user?.id
-                          ? "You are hosting this room."
-                          : "You joined someone else's room."}
-                      </p>
-                    </section>
+                    <>
+                      <section aria-label="Active room" className="space-y-2 border-b border-[#edf0ed] pb-5">
+                        <div className="flex items-center gap-2 text-[#16803c]">
+                          <Video aria-hidden="true" className="size-[18px]" />
+                          <h2 className="text-sm font-semibold">Room in progress</h2>
+                        </div>
+                        <p className="text-xs text-[#59635d]">Room ID: {activeRoom.room_id}</p>
+                        <p className="truncate text-xs text-[#59635d]">Video ID: {activeRoom.video_id}</p>
+                        <p className="text-[11px] text-[#858d88]">
+                          {activeRoom.controller_id === user?.id
+                            ? "You are hosting this room."
+                            : "You joined someone else's room."}
+                        </p>
+                      </section>
+                      <WatchRoomView
+                        clockOffsetMs={clockOffsetMs}
+                        currentUserId={user?.id}
+                        onLeave={leaveActiveRoom}
+                        onPlaybackAction={sendPlaybackAction}
+                        onRequestSync={requestRoomSync}
+                        room={activeRoom}
+                      />
+                    </>
                   ) : null}
 
                   {outgoingInvite && !activeRoom && (

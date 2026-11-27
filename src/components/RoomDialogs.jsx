@@ -262,7 +262,7 @@ export function CreateRoomDialog({
             )}
 
             <label className="mt-5 block text-xs font-medium text-[#59635d]" htmlFor="room-video-id">
-              Video ID
+              Cloudflare Stream video ID
             </label>
             <input
               autoComplete="off"
@@ -270,12 +270,12 @@ export function CreateRoomDialog({
               id="room-video-id"
               maxLength={128}
               onChange={(event) => setVideoId(event.target.value)}
-              placeholder="Paste the video ID"
+              placeholder="Paste the Cloudflare Stream video ID"
               required
               value={videoId}
             />
             <p className="mt-2 text-[11px] leading-5 text-[#858d88]">
-              Use the video's ID, not its full URL.
+              Use a public video's ID, not its full URL. Private videos need signed-token support.
             </p>
 
             {(error || connectionError) && (
