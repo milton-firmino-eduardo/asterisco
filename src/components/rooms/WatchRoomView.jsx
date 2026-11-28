@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { NativePlayerBridge } from "@/bridge/nativePlayerBridge"
-import { resolveStreamManifest } from "@/services/streamCatalogService"
 import {
   exceedsDriftTolerance,
   getExpectedPosition,
@@ -10,6 +9,7 @@ import VideoControlsOverlay from "@/components/rooms/VideoControlsOverlay"
 export default function WatchRoomView({
   room,
   currentUserId,
+  onRequestPlaybackAccess,
   clockOffsetMs,
   onPlaybackAction,
   onRequestSync,
@@ -67,9 +67,9 @@ export default function WatchRoomView({
     if (!video) return undefined
 
     let active = true
+    let refreshTimer
     let bridge
     try {
-      const manifestUrl = resolveStreamManifest(room.video_id)
       bridge = new NativePlayerBridge(video, (event) => {
         if (!active) return
         if (event.type === "ERROR") {
@@ -101,12 +101,34 @@ export default function WatchRoomView({
         }
       })
       bridgeRef.current = bridge
-      void bridge.loadStream({
-        url: manifestUrl,
-        initialPositionSec: room.position,
-        playbackRate: room.playback_rate,
-        autoPlay: false,
-      }).catch((error) => {
+      const loadAuthorizedStream = async () => {
+        const access = await onRequestPlaybackAccess(room.room_id)
+        if (!active) return
+
+        await bridge.loadStream({
+          url: access.url,
+          initialPositionSec: Number.isFinite(video.currentTime)
+            ? video.currentTime
+            : roomRef.current.position,
+          playbackRate: roomRef.current.playback_rate,
+          autoPlay: false,
+        })
+
+        const serverNow = Date.now() + clockOffsetRef.current
+        const refreshInMs = Math.max(30_000, access.expires_at * 1000 - serverNow - 60_000)
+        refreshTimer = window.setTimeout(() => {
+          loadAuthorizedStream().catch((error) => {
+            if (active) {
+              setPlayerState((current) => ({
+                ...current,
+                error: error instanceof Error ? error.message : "Could not renew video access.",
+              }))
+            }
+          })
+        }, refreshInMs)
+      }
+
+      void loadAuthorizedStream().catch((error) => {
         if (active) {
           setPlayerState((current) => ({
             ...current,
@@ -124,11 +146,12 @@ export default function WatchRoomView({
     return () => {
       active = false
       readyRef.current = false
+      window.clearTimeout(refreshTimer)
       window.clearTimeout(startTimerRef.current)
       bridge?.release()
       if (bridgeRef.current === bridge) bridgeRef.current = null
     }
-  }, [room.video_id, startRoomPlayback])
+  }, [onRequestPlaybackAccess, room.room_id, room.video_id, startRoomPlayback])
 
   useEffect(() => {
     if (!bridgeRef.current) return

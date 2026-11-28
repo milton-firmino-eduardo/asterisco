@@ -26,6 +26,7 @@ import WatchRoomView from "@/components/rooms/WatchRoomView"
 import { resolveAvatarUrl } from "@/lib/avatar"
 import { getDmProfilesByIds } from "@/lib/directMessages"
 import { supabase } from "@/lib/supabase"
+import { requestStreamPlaybackAccess } from "@/services/streamCatalogService"
 import { createClockSync } from "@/sync/clockSync"
 
 const websocketEndpoint = import.meta.env.VITE_ASTERISCO_WS_URL
@@ -95,6 +96,7 @@ export default function Home({ preview = false }) {
   const [signingOut, setSigningOut] = useState(false)
   const [clockOffsetMs, setClockOffsetMs] = useState(0)
   const socketRef = useRef(null)
+  const accessTokenRef = useRef("")
   const connectingRef = useRef(false)
   const attemptRef = useRef(0)
   const heartbeatRef = useRef(null)
@@ -330,7 +332,9 @@ export default function Home({ preview = false }) {
       const { data, error } = await supabase.functions.invoke("asterisco-token")
       if (error) throw error
       if (!data?.websocket_ticket) throw new Error("The server did not issue a connection ticket.")
+      if (!data?.access_token) throw new Error("The server did not issue an access token.")
       if (attemptRef.current !== attempt) return
+      accessTokenRef.current = data.access_token
 
       const socket = new WebSocket(createWebSocketUrl(data.websocket_ticket))
       socketRef.current = socket
@@ -531,6 +535,7 @@ export default function Home({ preview = false }) {
         if (attemptRef.current !== attempt || socketRef.current !== socket) return
         connectingRef.current = false
         socketRef.current = null
+        accessTokenRef.current = ""
         window.clearInterval(heartbeatRef.current)
         setConnectionState("offline")
         setOnlineUsers([])
@@ -543,6 +548,7 @@ export default function Home({ preview = false }) {
     } catch (error) {
       if (attemptRef.current !== attempt) return
       connectingRef.current = false
+      accessTokenRef.current = ""
       setConnectionState("offline")
       setConnectionError(error instanceof Error ? error.message : "Could not connect to asterisco.")
     }
@@ -647,6 +653,7 @@ export default function Home({ preview = false }) {
     respondingInviteIdRef.current = null
     const socket = socketRef.current
     socketRef.current = null
+    accessTokenRef.current = ""
     socket?.close(1000, "User disconnected")
     setConnectionState("offline")
     setOnlineUsers([])
@@ -656,6 +663,10 @@ export default function Home({ preview = false }) {
     setActiveRoom(null)
     setConnectionError("")
   }
+
+  const getRoomPlaybackAccess = useCallback((roomId) => (
+    requestStreamPlaybackAccess(roomId, accessTokenRef.current)
+  ), [])
 
   async function handleSignOut() {
     setSigningOut(true)
@@ -798,6 +809,7 @@ export default function Home({ preview = false }) {
                       <WatchRoomView
                         clockOffsetMs={clockOffsetMs}
                         currentUserId={user?.id}
+                        onRequestPlaybackAccess={getRoomPlaybackAccess}
                         onLeave={leaveActiveRoom}
                         onPlaybackAction={sendPlaybackAction}
                         onRequestSync={requestRoomSync}
